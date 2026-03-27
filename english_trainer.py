@@ -987,6 +987,7 @@ class EnglishTrainerApp:
 
         self.client = OpenAI(api_key=API_KEY) if API_KEY else None
         self.offline_mode = not bool(API_KEY)
+        self.preserve_status_once = False
 
         self.used_sentences = set()
         self.used_vocab = set()
@@ -2094,7 +2095,10 @@ class EnglishTrainerApp:
 
         self.refresh_profile_labels()
         self.refresh_home_side_cards()
-        self.set_status("● Ready", GREEN)
+        if self.preserve_status_once:
+            self.preserve_status_once = False
+        else:
+            self.set_status("● Ready", GREEN)
         callback(result)
         self.refresh_profile_labels()
         self.refresh_home_side_cards()
@@ -2102,8 +2106,57 @@ class EnglishTrainerApp:
         if self.current_mode != "multiple_choice":
             self.answer_text.focus_set()
 
+    def is_auth_error(self, exc):
+        msg = str(exc).lower()
+        auth_words = [
+            "invalid api key",
+            "incorrect api key",
+            "authentication",
+            "invalid_api_key",
+            "401",
+            "unauthorized",
+        ]
+        return any(word in msg for word in auth_words)
+
+    def handle_openai_runtime_error(self, exc):
+        global API_KEY
+
+        msg = str(exc).strip() or exc.__class__.__name__
+
+        if self.is_auth_error(exc):
+            self.offline_mode = True
+            self.client = None
+            API_KEY = ""
+            os.environ.pop("OPENAI_API_KEY", None)
+            self.preserve_status_once = True
+
+            try:
+                self.root.after(0, lambda: self.set_status("● API Key ungültig", RED))
+                self.root.after(
+                    0,
+                    lambda: self.set_result(
+                        "Fehler: Dein ChatGPT/OpenAI API-Key ist ungültig oder wurde deaktiviert. "
+                        "Bitte trage einen gültigen API-Key ein."
+                    ),
+                )
+                self.root.after(
+                    0,
+                    lambda: self.set_output(
+                        "OpenAI-Fehler:\n"
+                        f"{msg}\n\n"
+                        "Die App wurde in den Offline-Modus gesetzt. "
+                        "Bitte logge dich mit einem gültigen API-Key erneut ein."
+                    ),
+                )
+            except Exception:
+                pass
+
+            return "FEHLER: Dein ChatGPT/OpenAI API-Key ist ungültig oder wurde deaktiviert. Bitte gültigen API-Key eintragen."
+
+        return f"FEHLER: {msg}"
+
     def ask_model(self, prompt):
-        if not self.client:
+        if self.offline_mode or not self.client:
             return "FEHLER: OFFLINE_MODE"
         try:
             selected_model = self.model_var.get() if hasattr(self, "model_var") else DEFAULT_MODEL
@@ -2127,13 +2180,13 @@ class EnglishTrainerApp:
             text = getattr(response, "output_text", "")
             return text.strip() if text else ""
         except Exception as e:
-            return f"FEHLER: {e}"
+            return self.handle_openai_runtime_error(e)
 
     def is_bad_text(self, text):
         return (not text) or str(text).startswith("FEHLER:")
 
     def require_live_generation(self):
-        if not API_KEY:
+        if self.offline_mode or not self.client:
             return "Offline mode aktiv. Diese Aufgabe wird lokal erzeugt."
         return ""
 
